@@ -113,6 +113,49 @@
     color: var(--text-main);
     margin-top: 2px;
   }
+  .hourly-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-sub);
+    margin: 22px 0 10px;
+    text-align: left;
+  }
+  .hourly {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 6px;
+    margin: 0 -4px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+  .hourly-cell {
+    flex: 0 0 auto;
+    min-width: 52px;
+    text-align: center;
+    padding: 8px 4px;
+    border-radius: 12px;
+    background: rgba(0,0,0,0.03);
+  }
+  .hourly-cell .h-time {
+    font-size: 12px;
+    color: var(--text-sub);
+  }
+  .hourly-cell .h-emoji {
+    font-size: 24px;
+    margin: 4px 0;
+    line-height: 1;
+  }
+  .hourly-cell .h-temp {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-main);
+  }
+  .hourly-cell .h-pop {
+    font-size: 10px;
+    color: #4a90d9;
+    margin-top: 2px;
+  }
   .loading, .error {
     color: var(--text-sub);
     font-size: 15px;
@@ -142,15 +185,30 @@
 
 <script>
 // 気象庁(JMA)公式データを使用。forecastCode: 府県予報区コード
+// 時間別予報はOpen-Meteoを使うため緯度経度も保持
 const CITIES = {
-  takamatsu: { name: '高松', forecastCode: '370000' },
-  tokyo:     { name: '東京', forecastCode: '130000' },
-  osaka:     { name: '大阪', forecastCode: '270000' },
+  takamatsu: { name: '高松', forecastCode: '370000', lat: 34.3401, lon: 134.0434 },
+  tokyo:     { name: '東京', forecastCode: '130000', lat: 35.6762, lon: 139.6503 },
+  osaka:     { name: '大阪', forecastCode: '270000', lat: 34.6937, lon: 135.5023 },
 };
 
-// JMAはブラウザからの直接fetchにCORSを許可していないためプロキシ経由で取得
+// JMA/Open-MeteoともブラウザからのCORS/接続制限を避けるためプロキシ経由で取得
 function proxied(url) {
   return `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+}
+
+// Open-Meteoのweather_code → 絵文字
+function codeEmoji(code) {
+  if (code === 0) return '☀️';
+  if (code <= 2) return '🌤️';
+  if (code === 3) return '☁️';
+  if (code <= 48) return '🌫️';
+  if (code <= 57) return '🌦️';
+  if (code <= 67) return '🌧️';
+  if (code <= 77) return '❄️';
+  if (code <= 82) return '🌦️';
+  if (code <= 86) return '🌨️';
+  return '⛈️';
 }
 
 function weatherEmoji(text) {
@@ -231,13 +289,44 @@ async function fetchCity(city) {
   return { weatherText, tmax, tmin, currentTemp };
 }
 
+// 時間別予報(Open-Meteo)を全都市まとめて1回で取得。失敗しても本体表示は壊さない
+async function fetchHourlyAll() {
+  const keys = Object.keys(CITIES);
+  const lats = keys.map(k => CITIES[k].lat).join(',');
+  const lons = keys.map(k => CITIES[k].lon).join(',');
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}&hourly=temperature_2m,weather_code,precipitation_probability&forecast_days=1&timezone=Asia%2FTokyo`;
+  try {
+    const res = await fetch(proxied(url));
+    if (!res.ok) return;
+    const data = await res.json();
+    const list = Array.isArray(data) ? data : [data];
+    keys.forEach((key, i) => {
+      const h = list[i] && list[i].hourly;
+      if (h && h.time) {
+        cache[key] = cache[key] || {};
+        cache[key].hourly = h.time.map((t, j) => ({
+          time: t,
+          temp: h.temperature_2m ? h.temperature_2m[j] : null,
+          code: h.weather_code ? h.weather_code[j] : null,
+          pop: h.precipitation_probability ? h.precipitation_probability[j] : null,
+        }));
+      }
+    });
+  } catch (e) { /* 時間別が取れなくてもメイン表示は継続 */ }
+}
+
 async function fetchAll() {
   const keys = Object.keys(CITIES);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    const results = await Promise.all(keys.map(k => fetchCity(CITIES[k])));
-    keys.forEach((key, i) => { cache[key] = results[i]; });
+    const [results] = await Promise.all([
+      Promise.all(keys.map(k => fetchCity(CITIES[k]))),
+      fetchHourlyAll(),
+    ]);
+    keys.forEach((key, i) => {
+      cache[key] = Object.assign(cache[key] || {}, results[i]);
+    });
     showCity(currentKey);
   } catch (e) {
     const msg = e.name === 'AbortError' ? 'タイムアウトしました' : e.message;
@@ -265,8 +354,33 @@ function render(city, data) {
       <div>最高<strong>${data.tmax !== null ? Math.round(data.tmax) + '°' : '-'}</strong></div>
       <div>最低<strong>${data.tmin !== null ? Math.round(data.tmin) + '°' : '-'}</strong></div>
     </div>
+    ${renderHourly(data.hourly)}
   `;
   updatedEl.textContent = `更新: ${today.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })} (気象庁データ)`;
+}
+
+function renderHourly(hourly) {
+  if (!hourly || !hourly.length) return '';
+  const now = new Date();
+  const todayStr = now.toLocaleDateString('sv-SE'); // YYYY-MM-DD
+  // 今日ぶんのうち現在時刻以降を表示
+  const rows = hourly.filter(h => {
+    const d = new Date(h.time);
+    return h.time.slice(0, 10) === todayStr && d.getHours() >= now.getHours();
+  });
+  if (!rows.length) return '';
+  const cells = rows.map(h => {
+    const hh = new Date(h.time).getHours();
+    const pop = (h.pop !== null && h.pop !== undefined && h.pop >= 10) ? `<div class="h-pop">☂${h.pop}%</div>` : '';
+    const temp = h.temp !== null && h.temp !== undefined ? Math.round(h.temp) + '°' : '-';
+    return `<div class="hourly-cell">
+      <div class="h-time">${hh}時</div>
+      <div class="h-emoji">${h.code !== null ? codeEmoji(h.code) : '❓'}</div>
+      <div class="h-temp">${temp}</div>
+      ${pop}
+    </div>`;
+  }).join('');
+  return `<p class="hourly-title">今日の時間別予報</p><div class="hourly">${cells}</div>`;
 }
 
 tabs.forEach(btn => {
