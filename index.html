@@ -185,18 +185,37 @@ function weatherInfo(code) {
 const card = document.getElementById('card');
 const updatedEl = document.getElementById('updated');
 const tabs = document.querySelectorAll('.city-tabs button');
+const cache = {};
+let currentKey = 'takamatsu';
 
-async function loadCity(key) {
-  const city = CITIES[key];
-  card.innerHTML = '<div class="loading">読み込み中...</div>';
+function showCity(key) {
+  currentKey = key;
+  if (cache[key]) {
+    render(CITIES[key], cache[key]);
+  } else {
+    card.innerHTML = '<div class="loading">読み込み中...</div>';
+  }
+}
+
+async function fetchAll() {
+  const keys = Object.keys(CITIES);
+  const lats = keys.map(k => CITIES[k].lat).join(',');
+  const lons = keys.map(k => CITIES[k].lon).join(',');
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}&current=temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min&forecast_days=1&timezone=Asia%2FTokyo`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
   try {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${city.lat}&longitude=${city.lon}&current=temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min&timezone=Asia%2FTokyo`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) throw new Error('取得失敗');
     const data = await res.json();
-    render(city, data);
+    const list = Array.isArray(data) ? data : [data];
+    keys.forEach((key, i) => { cache[key] = list[i]; });
+    showCity(currentKey);
   } catch (e) {
-    card.innerHTML = `<div class="error">天気情報の取得に失敗しました<br>${e.message}</div>`;
+    const msg = e.name === 'AbortError' ? 'タイムアウトしました' : e.message;
+    card.innerHTML = `<div class="error">天気情報の取得に失敗しました<br>${msg}</div>`;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -228,11 +247,11 @@ tabs.forEach(btn => {
   btn.addEventListener('click', () => {
     tabs.forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    loadCity(btn.dataset.city);
+    showCity(btn.dataset.city);
   });
 });
 
-loadCity('takamatsu');
+fetchAll();
 </script>
 </body>
 </html>
